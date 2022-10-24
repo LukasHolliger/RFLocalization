@@ -1,0 +1,91 @@
+import torch
+import math
+import numpy as np
+from torch.utils.data import DataLoader
+import pandas as pd
+from data import PhaseDiffDataSet
+from model import PhaseDiffModel
+import matplotlib.pyplot as plt
+from parameters import tau, n
+from GenerateTrajectory import GenerateTraj
+
+"""
+Evaluate Trajectory:
+Uses current model.pt to estimate points along a trajectory.
+Set NewTraj to True to generate new trajectory of given length, False to use previous one instead.
+Trajectories are saved in TrajPhases, TrajPositions and TrajVelocities CSV files.
+
+Variables:
+sigma - Standard deviation of noise to be added to prior
+anglevar - Variance of noise to be added to observations
+"""
+
+
+NewTraj = False
+if NewTraj:
+    GenerateTraj(50)
+
+
+criterion = torch.nn.MSELoss()
+model = PhaseDiffModel()
+model.load_state_dict(torch.load('model.pt'))
+model.to(dtype=float)
+
+
+observationsDF = pd.read_csv('TrajPhases.csv')
+targetsDF = pd.read_csv('TrajPositions.csv')
+velocitiesDF = pd.read_csv('TrajVelocities.csv')
+
+observations = torch.tensor(observationsDF.values)
+targets = torch.tensor(targetsDF.values)
+velocities = torch.tensor(velocitiesDF.values)
+
+outputhist = torch.tensor(np.zeros([len(targets), 3]))
+estimatehist = torch.tensor(np.zeros([len(targets), 3]))
+
+#define noise amount
+sigma = 1/3.16
+anglevar = 0
+
+#adding noise
+noise_x = np.random.normal(0, sigma, size=targetsDF['0'].shape)
+noise_y = np.random.normal(0, sigma, size=targetsDF['0'].shape)
+noise_z = np.random.normal(0, sigma*0.01, size=targetsDF['0'].shape)
+noise = np.vstack((noise_x, noise_y, noise_z)).transpose()
+noisesize = (noise_x**2 + noise_y**2 + noise_z**2)/3
+noisesize = np.sum(noisesize)/len(noisesize)
+phasevariance = (2 * math.pi / 360) * anglevar
+phasenoise = torch.from_numpy(np.random.normal(0, np.sqrt(phasevariance), size=observations.shape))
+
+#make estimates
+with torch.no_grad():
+    model.eval()
+    for i in range(len(observations)):
+        estimate = targets[i].add(torch.from_numpy(noise[i]))
+        input = torch.cat((estimate, observations[i].add(phasenoise[i]) % 2*math.pi))
+        input = input[None, :]
+        outputhist[i] = model(input)
+        estimatehist[i] = estimate
+
+#calculate MSE
+diff = targets-outputhist
+MSE = np.zeros(len(diff))
+for i in range(len(MSE)):
+        MSE[i] = 1 / 3 * (diff[i][0] ** 2 + diff[i][1] ** 2 + diff[i][2] ** 2)
+
+print(outputhist, targets)
+print(f"MSE:{10 * np.log10(np.sum(MSE)/len(MSE))}")
+print(10*np.log10(noisesize))
+outputhistnp = outputhist.detach().numpy()
+targetsnp = targets.detach().numpy()
+
+#plot result
+plt.scatter(outputhistnp[:, 0], outputhistnp[:, 1], facecolors='none',
+            edgecolors='b', label="Estimated position")
+plt.scatter(targetsnp[:, 0], targetsnp[:, 1], facecolors='none', edgecolors='r', alpha=0.5, label="Original positions")
+plt.scatter(estimatehist[:, 0], estimatehist[:, 1], facecolors='none', edgecolors='g', alpha=0.5, label="Prior")
+plt.title('Localizing along trajectory')
+plt.xlabel('x')
+plt.ylabel('y')
+plt.legend()
+plt.show()
